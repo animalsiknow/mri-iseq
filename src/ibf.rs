@@ -6,6 +6,7 @@ use std::{borrow, collections, convert, fmt, result, str};
 
 pub const BAD_MAGIC: u32 = 1024;
 pub const UNSUPPORTED_VERSION: u32 = 1025;
+pub const SYMBOL_IS_NOT_A_STRING: u32 = 1026;
 
 #[derive(Debug)]
 pub enum Error {
@@ -17,6 +18,11 @@ pub type Result<T> = result::Result<T, Error>;
 named!(
   cstr<&str>,
   map_res!(take_until_and_consume!("\0"), |bytes| str::from_utf8(bytes))
+);
+
+named!(
+  index_from_long<usize>,
+  do_parse!(raw: le_i64 >> (raw as usize))
 );
 
 named!(
@@ -110,6 +116,21 @@ named_args!(
   )
 );
 
+fn symbol<'objects>(
+  object_source: &'objects [u8],
+  object_loader: &'objects ObjectLoader<'objects, 'objects>,
+) -> nom::IResult<&'objects [u8], Value<'objects, 'objects>> {
+  let (rest, index) = index_from_long(object_source)?;
+  match object_loader.load(index) {
+    Ok(&Value::String(ref s)) => Ok((rest, Value::Symbol(s.clone()))),
+    Ok(_) => Err(nom::Err::Error(nom::Context::Code(
+      object_source,
+      nom::ErrorKind::Custom(SYMBOL_IS_NOT_A_STRING),
+    ))),
+    Err(err) => panic!("TODO: {:?}", err),
+  }
+}
+
 named!(
   fixnum<Value>,
   do_parse!(tagged_value: le_i64 >> (Value::Fixnum(tagged_value >> 1)))
@@ -124,6 +145,9 @@ named_args!(
       ValueTy::String => call!(string) |
       ValueTy::Array => apply!(array, object_loader) |
       ValueTy::Nil => value!(Value::Nil) |
+      ValueTy::True => value!(Value::True) |
+      ValueTy::False => value!(Value::False) |
+      ValueTy::Symbol => apply!(symbol, object_loader) |
       ValueTy::Fixnum => call!(fixnum) |
       _ => value!(Value::String(format!("{:?}", header).into()))
     ) >>
@@ -258,6 +282,7 @@ pub enum Value<'objects, 'source: 'objects> {
   Nil,
   True,
   False,
+  Symbol(borrow::Cow<'source, str>),
   Fixnum(i64),
 }
 
