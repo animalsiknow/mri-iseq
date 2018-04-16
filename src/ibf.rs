@@ -2,7 +2,7 @@ use encoding::{self, Encoding};
 use lazy_array::LazyArray;
 use nom::{self, le_i32, le_i64, le_u32, le_u64};
 use num_traits::FromPrimitive;
-use std::{borrow, collections, convert, fmt, result, str};
+use std::{borrow::{self, Borrow}, collections, convert, fmt, result, str};
 
 pub const BAD_MAGIC: u32 = 1024;
 pub const UNSUPPORTED_VERSION: u32 = 1025;
@@ -116,13 +116,13 @@ named_args!(
   )
 );
 
-fn symbol<'objects>(
-  object_source: &'objects [u8],
+fn symbol<'objects, 'source: 'objects>(
+  object_source: &'source [u8],
   object_loader: &'objects ObjectLoader<'objects, 'objects>,
-) -> nom::IResult<&'objects [u8], Value<'objects, 'objects>> {
+) -> nom::IResult<&'source [u8], Value<'objects, 'objects>> {
   let (rest, index) = index_from_long(object_source)?;
   match object_loader.load(index) {
-    Ok(&Value::String(ref s)) => Ok((rest, Value::Symbol(s.clone()))),
+    Ok(&Value::String(ref s)) => Ok((rest, Value::Symbol(s.borrow()))),
     Ok(_) => Err(nom::Err::Error(nom::Context::Code(
       object_source,
       nom::ErrorKind::Custom(SYMBOL_IS_NOT_A_STRING),
@@ -282,7 +282,7 @@ pub enum Value<'objects, 'source: 'objects> {
   Nil,
   True,
   False,
-  Symbol(borrow::Cow<'source, str>),
+  Symbol(&'objects str),
   Fixnum(i64),
 }
 
