@@ -1,0 +1,34 @@
+[package]
+name = "mri-iseq"
+description = "A library and CLI tool to interact with MRI instruction sequences."
+version = "0.1.0"
+authors = ["Simon Génier <1782845+animalsiknow@users.noreply.github.com>"]
+homepage = "https://github.com/animalsiknow/mir-iseq"
+license = "AGPL-3.0-or-later"
+readme = "README.org"
+
+[dependencies.bitfield]
+version = "0.12.1"
+
+[dependencies.clap]
+version = "^2.31"
+
+[dependencies.lazy-array]
+version = "0.1.2"
+
+[dependencies.nom]
+version = "4.0.0-beta2"
+features = ["verbose-errors"]
+
+[dependencies.num-derive]
+version = "0.2.0"
+features = ["full-syntax"]
+
+[dependencies.num-traits]
+version = "0.2.2"
+
+[dependencies.serde]
+version = "^1.0"
+
+[dependencies.subprocess]
+version = "0.1.12"

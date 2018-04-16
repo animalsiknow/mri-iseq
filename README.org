@@ -1,0 +1,85 @@
+* The MRI Instruction Sequences Tool
+
+** The MRI Instruction Sequence Format
+
+   This section is a reference to the Ruby instruction sequence format. It is
+   also know as IBF, which I believe stands for /internal binary format/. You
+   can find this acronym both in the MRI source code as well as in this program.
+   An IBF file is made of multiple sections, namely the *header*, the *data*,
+   and the *lists*.
+
+*** The Header
+
+    The header is made of 12 fields. Before I list them, it must be understood
+    that when I write ~unsigned int~, I really mean ~unsigned int~, whatever it
+    means on your platform, and not something like a 4 byte, little endian
+    number. This format was designed to cache instruction sequence and be as
+    fast as possible to load. The tradeoff that it is not portable between
+    machines.
+
+    - Magic number ::
+      Always the four byte string ~YARB~.
+    - Major version number ::
+      An ~unsigned int~ that matches the major version of MRI.
+    - Minor version number ::
+      An ~unsigned int~ that matches the minor version of MRI.
+    - Size ::
+      The total size of the file in bytes, including this header, as an
+      ~unsigned int~.
+    - Extra size :: ???
+    - List size ::
+      The number of entries in the instruction sequence, id, or object list, as an
+      ~unsigned int~.
+    - List offset ::
+      The offset in bytes as an ~unsigned int~ of the instruction sequence, id, or
+      object list.
+    - Platform ::
+      A null terminated, C-style string that matches ~RUBY_PLATFORM~.
+
+    | Magic number                     | Major version number           |
+    | Minor version number             | Size                           |
+    | Extra size                       | Instruction sequence list size |
+    | Id list size                     | Object list size               |
+    | Instruction sequence list offset | Id list offset                 |
+    | Object list offset               | Platform                       |
+
+*** The Lists
+
+    Instruction sequence and object lists are sequences of integer entries. Each
+    of them is an offset in bytes in the IBF file, encoded as an ~unsigned int~
+
+    Id lists are lists of ~long~ entries. They are offsets, /in number of entries/
+    and not bytes, into the object list. The object they are pointing to is the
+    string representation of the id.
+
+*** The Data
+
+**** Instruction Sequences
+
+**** Objects
+
+     The following objects can be stored in an IBF file. An up to date list can be
+     found in ~load_object_functions~ in ~compile.c~.
+     - Any "special const" ::
+       This include values such as ~true~, ~false~, fixnums, /etc/.
+     - ~T_CLASS~ :: Ruby classes, /by name/.
+     - ~T_FLOAT~ :: Double precision, architecture specific floating point numbers.
+     - ~T_STRING~ :: Strings, content and encoding.
+     - ~T_REGEXP~ :: Regular expressions.
+     - ~T_ARRAY~ :: Arrays.
+     - ~T_HASH~ :: Hashes.
+     - ~T_STRUCT~ :: Structures.
+     - ~T_BIGNUM~ :: Arbitrary precision integers.
+     - ~T_DATA~ :: ???
+     - ~T_COMPLEX~ :: Complex number.
+     - ~T_RATIONAL~ :: Rational number.
+     - ~T_SYMBOL~ :: Symbol.
+
+     Of course, composite types (arrays, hashes, and structures) must only contain
+     values that are also storable.
+
+** Glossary
+
+   - Id ::
+   It is the untagged representation of interned strings in MRI, usually called
+   symbols.
