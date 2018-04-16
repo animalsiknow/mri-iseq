@@ -1,3 +1,4 @@
+use encoding::{self, Encoding};
 use lazy_array::LazyArray;
 use nom::{self, le_i32, le_i64, le_u32, le_u64};
 use num_traits::FromPrimitive;
@@ -75,12 +76,16 @@ named!(
 );
 
 fn convert_string(encoding_index: i64, data: &[u8]) -> Value {
-  match StringEncoding::from_i64(encoding_index) {
+  Value::String(match StringEncoding::from_i64(encoding_index) {
     Some(StringEncoding::Utf8) | Some(StringEncoding::UsAscii) => {
-      Value::String(str::from_utf8(data).unwrap().into())
+      str::from_utf8(data).unwrap().into()
     }
+    Some(StringEncoding::Ascii) => encoding::all::ISO_8859_1
+      .decode(data, encoding::DecoderTrap::Strict)
+      .unwrap()
+      .into(),
     encoding => panic!("Unsupported encoding {:?}.", encoding),
-  }
+  })
 }
 
 named!(

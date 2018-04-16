@@ -1,5 +1,6 @@
 #[macro_use]
 extern crate bitfield;
+extern crate encoding;
 extern crate lazy_array;
 #[macro_use]
 extern crate nom;

@@ -13,6 +13,9 @@ version = "0.12.1"
 [dependencies.clap]
 version = "^2.31"
 
+[dependencies.encoding]
+version = "0.2.33"
+
 [dependencies.lazy-array]
 version = "0.1.2"
 
