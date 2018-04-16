@@ -70,20 +70,48 @@ fn disassemble_ibf_header(ibf_source: &[u8]) -> ibf::Result<ibf::RawHeader> {
   }
 }
 
+fn print_ibf_header<'source>(header: &ibf::RawHeader) {
+  println!("IBF Header:");
+  println!("  Magic:\t\t\tYARB");
+  println!(
+    "  Version:\t\t\t{}",
+    match header.version {
+      ibf::Version::Ibf25 => "2.5",
+    }
+  );
+  println!("  Size:\t\t\t\t{}", header.size);
+  println!("  Extra size:\t\t\t{}", header.extra_size);
+  println!(
+    "  Instruction sequences:\t{} entries at offset Ox{:x}",
+    header.iseq_list_size, header.iseq_list_offset
+  );
+  println!(
+    "  Ids:\t\t\t\t{} entries at offset Ox{:x}",
+    header.id_list_size, header.id_list_offset
+  );
+  println!(
+    "  Objects:\t\t\t{} entries at offset Ox{:x}",
+    header.object_list_size, header.object_list_offset
+  );
+  println!("  Platform:\t\t\t{}", header.platform);
+}
+
 fn print_ibf_objects<'source>(
   header: &ibf::RawHeader,
   ibf_source: &'source [u8],
 ) -> ibf::Result<()> {
+  println!("Objects:");
   let object_store = ibf::ObjectLoader::new(header, ibf_source);
   for i in 0..object_store.len() {
-    println!("{}: {:?}", i, object_store.load(i)?);
+    println!("  {}: {:?}", i, object_store.load(i)?);
   }
   Ok(())
 }
 
 fn disassemble_ibf(ibf_source: &[u8]) -> ibf::Result<()> {
   let header = disassemble_ibf_header(ibf_source)?;
-  println!("{:?}", header);
+  print_ibf_header(&header);
+  println!("");
   print_ibf_objects(&header, ibf_source)?;
   Ok(())
 }
