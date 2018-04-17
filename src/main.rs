@@ -13,15 +13,15 @@ const DISASSEMBLE_INPUT_HELP: &'static str =
 
 #[derive(Debug)]
 enum Error {
-  Ibf(ibf::Error),
+  Parse(String),
   Io(io::Error),
   Popen(subprocess::PopenError),
   Cli(clap::Error),
 }
 
-impl From<ibf::Error> for Error {
-  fn from(err: ibf::Error) -> Self {
-    Error::Ibf(err)
+impl<'source> From<ibf::Error<'source>> for Error {
+  fn from(err: ibf::Error<'source>) -> Self {
+    Error::Parse(format!("{}", err))
   }
 }
 
@@ -63,13 +63,6 @@ fn app<'a, 'b>() -> clap::App<'a, 'b> {
     )
 }
 
-fn disassemble_ibf_header(ibf_source: &[u8]) -> ibf::Result<ibf::RawHeader> {
-  match ibf::header(&ibf_source) {
-    Ok((_rest, header)) => Ok(header),
-    result => Err(ibf::Error::Parse(ibf::display_error(&ibf_source, result))),
-  }
-}
-
 fn print_ibf_header<'source>(header: &ibf::RawHeader) {
   println!("IBF Header:");
   println!("  Magic:\t\t\tYARB");
@@ -97,9 +90,9 @@ fn print_ibf_header<'source>(header: &ibf::RawHeader) {
 }
 
 fn print_ibf_objects<'source>(
-  header: &ibf::RawHeader,
+  header: &'source ibf::RawHeader,
   ibf_source: &'source [u8],
-) -> ibf::Result<()> {
+) -> Result<()> {
   println!("Objects:");
   let object_store = ibf::ObjectLoader::new(header, ibf_source);
   for i in 0..object_store.len() {
@@ -108,12 +101,11 @@ fn print_ibf_objects<'source>(
   Ok(())
 }
 
-fn disassemble_ibf(ibf_source: &[u8]) -> ibf::Result<()> {
-  let header = disassemble_ibf_header(ibf_source)?;
+fn disassemble_ibf(ibf_source: &[u8]) -> Result<()> {
+  let header = ibf::parse_header(ibf_source)?;
   print_ibf_header(&header);
   println!("");
-  print_ibf_objects(&header, ibf_source)?;
-  Ok(())
+  print_ibf_objects(&header, ibf_source)
 }
 
 const DUMP_ISEQ_PROGRAM_SOURCE: &'static str =
@@ -129,8 +121,7 @@ fn disassemble_rb(file_path: &path::Path) -> Result<()> {
     .stream_stdout()?;
   let mut ibf_source = vec![];
   ibf_source_stream.read_to_end(&mut ibf_source)?;
-  disassemble_ibf(&mut ibf_source)?;
-  Ok(())
+  disassemble_ibf(&mut ibf_source)
 }
 
 fn disassemble(file_name: &str) -> Result<()> {
@@ -141,8 +132,7 @@ fn disassemble(file_name: &str) -> Result<()> {
     let mut ibf_source_stream = fs::File::open(file_path)?;
     let mut ibf_source = vec![];
     ibf_source_stream.read_to_end(&mut ibf_source)?;
-    disassemble_ibf(&mut ibf_source)?;
-    Ok(())
+    disassemble_ibf(&mut ibf_source)
   }
 }
 
@@ -167,12 +157,15 @@ fn go() -> Result<()> {
 fn main() {
   process::exit(match go() {
     Ok(()) => 0,
-    Err(Error::Ibf(ibf::Error::Parse(message))) => {
-      println!("{}", message);
-      1
-    }
-    Err(err) => {
-      println!("{:?}", err);
+    Err(ref err) => {
+      match err {
+        &Error::Parse(ref message) => {
+          println!("{}", message);
+        }
+        err => {
+          println!("{:?}", err);
+        }
+      };
       1
     }
   })

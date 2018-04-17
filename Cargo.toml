@@ -19,6 +19,9 @@ version = "0.2.33"
 [dependencies.lazy-array]
 version = "0.1.2"
 
+[dependencies.lazy_static]
+version = "^1.0"
+
 [dependencies.nom]
 version = "4.0.0-beta2"
 features = ["verbose-errors"]

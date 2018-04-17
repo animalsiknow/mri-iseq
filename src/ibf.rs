@@ -2,18 +2,68 @@ use encoding::{self, Encoding};
 use lazy_array::LazyArray;
 use nom::{self, le_i32, le_i64, le_u32, le_u64};
 use num_traits::FromPrimitive;
-use std::{borrow::{self, Borrow}, collections, convert, fmt, result, str};
+use std::{collections, convert, fmt, result, str, borrow::{self, Borrow}};
 
-pub const BAD_MAGIC: u32 = 1024;
-pub const UNSUPPORTED_VERSION: u32 = 1025;
-pub const SYMBOL_IS_NOT_A_STRING: u32 = 1026;
-
-#[derive(Debug)]
-pub enum Error {
-  Parse(String),
+#[repr(u32)]
+pub enum ErrorKind {
+  SymbolIsNotAString = 1024,
 }
 
-pub type Result<T> = result::Result<T, Error>;
+lazy_static! {
+  static ref ERROR_NAMES: collections::HashMap<u32, &'static str> = {
+    let mut error_names = collections::HashMap::new();
+    error_names.insert(
+      nom::error_to_u32::<&[u8]>(&nom::ErrorKind::Tag),
+      nom::ErrorKind::Tag::<&[u8]>.description(),
+    );
+    error_names
+  };
+}
+
+lazy_static! {
+  static ref ERROR_PATTERNS: collections::HashMap<Vec<(&'static [u8], nom::ErrorKind)>, &'static str> = {
+    let error_patterns = collections::HashMap::new();
+    // TODO
+    error_patterns
+  };
+}
+
+#[derive(Debug)]
+pub enum Error<'source> {
+  Parse(&'source [u8], nom::Err<&'source [u8]>),
+}
+
+impl<'source> fmt::Display for Error<'source> {
+  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    match self {
+      &Error::Parse(_, nom::Err::Incomplete(_)) => write!(f, "error: truncated input"),
+      &Error::Parse(_, nom::Err::Failure(_)) => write!(f, "error: internal"),
+      &Error::Parse(source, nom::Err::Error(ref context)) => {
+        let error = Err(nom::Err::Error(context.clone()));
+        if let Some(errors) = nom::prepare_errors::<&[u8], u32>(source, error) {
+          writeln!(
+            f,
+            "================== Error: Invalid IBF =================="
+          )?;
+          if let Some(message) = ERROR_PATTERNS.get(&nom::error_to_list(context)) {
+            writeln!(f, "{}", message)?;
+          }
+          let colours = nom::generate_colors(&errors);
+          write!(
+            f,
+            "parsers: {}\n{}",
+            nom::print_codes(&colours, &ERROR_NAMES),
+            nom::print_offsets(source, 0, &errors)
+          )
+        } else {
+          write!(f, "error: oops")
+        }
+      }
+    }
+  }
+}
+
+pub type Result<'source, T> = result::Result<T, Error<'source>>;
 
 named!(
   cstr<&str>,
@@ -25,42 +75,27 @@ named!(
   do_parse!(raw: le_i64 >> (raw as usize))
 );
 
-named!(
-  magic,
-  add_return_error!(ErrorKind::Custom(BAD_MAGIC), tag!(b"YARB"))
-);
+named!(magic, tag!(b"YARB"));
 
 named!(
   version<Version>,
-  add_return_error!(
-    ErrorKind::Custom(UNSUPPORTED_VERSION),
-    switch!(
-      do_parse!(
-        major: le_i32 >>
-        minor: le_i32 >>
-        (major, minor)
-      ),
-      (2, 5) => value!(Version::Ibf25)
-    )
+  switch!(
+    do_parse!(
+      major: le_i32 >>
+      minor: le_i32 >>
+      (major, minor)
+    ),
+    (2, 5) => value!(Version::Ibf25)
   )
 );
 
 named!(
-  pub header<RawHeader>,
+  header<RawHeader>,
   do_parse!(
-    magic >>
-    version: version >>
-    size: le_i32 >>
-    extra_size: le_i32 >>
-    iseq_list_size: le_i32 >>
-    id_list_size: le_i32 >>
-    object_list_size: le_i32 >>
-    iseq_list_offset: le_i32 >>
-    id_list_offset: le_i32 >>
-    object_list_offset: le_i32 >>
-    platform: cstr >>
-    (
-      RawHeader {
+    magic >> version: version >> size: le_i32 >> extra_size: le_i32 >> iseq_list_size: le_i32
+      >> id_list_size: le_i32 >> object_list_size: le_i32 >> iseq_list_offset: le_i32
+      >> id_list_offset: le_i32 >> object_list_offset: le_i32 >> platform: cstr
+      >> (RawHeader {
         version,
         size,
         extra_size,
@@ -71,10 +106,16 @@ named!(
         id_list_offset,
         object_list_offset,
         platform,
-      }
-    )
+      })
   )
 );
+
+pub fn parse_header(ibf_source: &[u8]) -> Result<RawHeader> {
+  match header(ibf_source) {
+    Ok((_rest, header)) => Ok(header),
+    Err(err) => Err(Error::Parse(ibf_source, err)),
+  }
+}
 
 named!(
   object_header<RawValueHeader>,
@@ -125,7 +166,7 @@ fn symbol<'objects, 'source: 'objects>(
     Ok(&Value::String(ref s)) => Ok((rest, Value::Symbol(s.borrow()))),
     Ok(_) => Err(nom::Err::Error(nom::Context::Code(
       object_source,
-      nom::ErrorKind::Custom(SYMBOL_IS_NOT_A_STRING),
+      nom::ErrorKind::Custom(ErrorKind::SymbolIsNotAString as u32),
     ))),
     Err(err) => panic!("TODO: {:?}", err),
   }
@@ -199,42 +240,8 @@ impl<'objects, 'source: 'objects> ObjectLoader<'objects, 'source> {
     let object_source = &self.source[self.offsets[index]..];
     match object(object_source, self) {
       Ok((_rest, object)) => Ok(object),
-      err => Err(Error::Parse(display_error(&object_source, err))),
+      Err(err) => Err(Error::Parse(object_source, err)),
     }
-  }
-}
-
-fn generate_colours(v: &[(nom::ErrorKind<u32>, usize, usize)]) -> collections::HashMap<u32, u8> {
-  let mut h: collections::HashMap<u32, u8> = collections::HashMap::new();
-  let mut color = 0;
-
-  for &(ref c, _, _) in v.iter() {
-    let code = match c {
-      &nom::ErrorKind::Custom(code) => code,
-      c => nom::error_to_u32(c),
-    };
-    h.insert(code, color + 31);
-    color = color + 1 % 7;
-  }
-
-  h
-}
-
-// TODO remove pub
-pub fn display_error<O: fmt::Debug>(source: &[u8], result: nom::IResult<&[u8], O>) -> String {
-  let mut h: collections::HashMap<u32, &str> = collections::HashMap::new();
-  h.insert(BAD_MAGIC, "magic");
-  h.insert(UNSUPPORTED_VERSION, "version");
-
-  if let Some(errors) = nom::prepare_errors(source, result) {
-    let colours = generate_colours(&errors);
-    format!(
-      "parsers: {}\n{}",
-      nom::print_codes(&colours, &h),
-      nom::print_offsets(source, 0, &errors)
-    )
-  } else {
-    "?".into()
   }
 }
 
