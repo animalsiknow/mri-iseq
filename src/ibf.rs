@@ -222,11 +222,11 @@ pub struct Loader<'loader, 'source: 'loader> {
   source: &'source [u8],
 }
 
-impl<'objects, 'source: 'objects> Loader<'objects, 'source> {
+impl<'loader, 'source: 'loader> Loader<'loader, 'source> {
   pub fn new(
     header: &Header<'source>,
     source: &'source [u8],
-  ) -> Result<'source, Loader<'objects, 'source>> {
+  ) -> Result<'source, Loader<'loader, 'source>> {
     let object_offsets =
       match offset_list(source, header.object_list_offset, header.object_list_size) {
         Ok((_rest, offsets)) => offsets,
@@ -253,7 +253,7 @@ impl<'objects, 'source: 'objects> Loader<'objects, 'source> {
     self.object_offsets.len()
   }
 
-  pub fn load_id(&'objects self, index: usize) -> Result<'source, &'objects Id<'objects>> {
+  pub fn load_id(&'loader self, index: usize) -> Result<'source, &'loader Id<'loader>> {
     match self.ids.get(index) {
       Some(value) => Ok(value),
       None => {
@@ -264,9 +264,9 @@ impl<'objects, 'source: 'objects> Loader<'objects, 'source> {
   }
 
   pub fn load_object(
-    &'objects self,
+    &'loader self,
     index: usize,
-  ) -> Result<'source, &'objects Value<'objects, 'source>> {
+  ) -> Result<'source, &'loader Value<'loader, 'source>> {
     match self.objects.get(index) {
       Some(value) => Ok(value),
       None => {
@@ -276,7 +276,7 @@ impl<'objects, 'source: 'objects> Loader<'objects, 'source> {
     }
   }
 
-  fn do_load_id(&'objects self, index: usize) -> Result<'source, Id<'objects>> {
+  fn do_load_id(&'loader self, index: usize) -> Result<'source, Id<'loader>> {
     let object_index = self.id_indices[index];
     match self.load_object(object_index)? {
       &Value::String(ref s) => Ok(Id(s.borrow())),
@@ -285,7 +285,7 @@ impl<'objects, 'source: 'objects> Loader<'objects, 'source> {
     }
   }
 
-  fn do_load_object(&'objects self, index: usize) -> Result<'source, Value<'objects, 'source>> {
+  fn do_load_object(&'loader self, index: usize) -> Result<'source, Value<'loader, 'source>> {
     let object_source = &self.source[self.object_offsets[index]..];
     match object(object_source, self) {
       Ok((_rest, object)) => Ok(object),
@@ -332,16 +332,16 @@ pub enum IseqType {
 }
 
 #[derive(Clone, Debug)]
-pub struct Id<'objects>(&'objects str);
+pub struct Id<'loader>(&'loader str);
 
 #[derive(Clone, Debug)]
-pub enum Value<'objects, 'source: 'objects> {
+pub enum Value<'loader, 'source: 'loader> {
   String(borrow::Cow<'source, str>),
-  Array(Vec<&'objects Value<'objects, 'source>>),
+  Array(Vec<&'loader Value<'loader, 'source>>),
   Nil,
   True,
   False,
-  Symbol(&'objects str),
+  Symbol(&'loader str),
   Fixnum(i64),
 }
 
@@ -413,24 +413,24 @@ pub enum StringEncoding {
 }
 
 #[derive(Debug)]
-pub struct KwParam<'objects, 'source: 'objects> {
+pub struct KwParam<'loader, 'source: 'loader> {
   pub name: &'source str,
-  pub default_value: Option<Value<'objects, 'source>>,
+  pub default_value: Option<Value<'loader, 'source>>,
 }
 
 #[derive(Debug)]
-pub struct IseqParamSpec<'objects, 'source: 'objects> {
+pub struct IseqParamSpec<'loader, 'source: 'loader> {
   pub size_lead: u32,
   pub size_opt: u32,
   pub has_rest: bool,
   pub size_post: u32,
-  pub keywords: Vec<KwParam<'objects, 'source>>,
+  pub keywords: Vec<KwParam<'loader, 'source>>,
   pub has_kw_rest: bool,
   pub has_block: bool,
 }
 
 #[derive(Debug)]
-pub struct Iseq<'objects, 'source: 'objects> {
+pub struct Iseq<'loader, 'source: 'loader> {
   pub ty: IseqType,
-  pub param_spec: IseqParamSpec<'objects, 'source>,
+  pub param_spec: IseqParamSpec<'loader, 'source>,
 }
