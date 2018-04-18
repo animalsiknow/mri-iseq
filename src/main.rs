@@ -63,7 +63,7 @@ fn app<'a, 'b>() -> clap::App<'a, 'b> {
     )
 }
 
-fn print_ibf_header<'source>(header: &ibf::RawHeader) {
+fn print_ibf_header<'source>(header: &ibf::Header) {
   println!("IBF Header:");
   println!("  Magic:\t\t\tYARB");
   println!(
@@ -89,14 +89,22 @@ fn print_ibf_header<'source>(header: &ibf::RawHeader) {
   println!("  Platform:\t\t\t{}", header.platform);
 }
 
-fn print_ibf_objects<'source>(
-  header: &'source ibf::RawHeader,
-  ibf_source: &'source [u8],
+fn print_ibf_ids<'source, 'loader: 'source>(
+  loader: &'loader ibf::Loader<'source, 'loader>,
+) -> Result<()> {
+  println!("Ids:");
+  for i in 0..loader.id_count() {
+    println!("  {}: {:?}", i, loader.load_id(i)?);
+  }
+  Ok(())
+}
+
+fn print_ibf_objects<'source, 'loader: 'source>(
+  loader: &'loader ibf::Loader<'source, 'loader>,
 ) -> Result<()> {
   println!("Objects:");
-  let object_store = ibf::ObjectLoader::new(header, ibf_source);
-  for i in 0..object_store.len() {
-    println!("  {}: {:?}", i, object_store.load(i)?);
+  for i in 0..loader.object_count() {
+    println!("  {}: {:?}", i, loader.load_object(i)?);
   }
   Ok(())
 }
@@ -104,8 +112,12 @@ fn print_ibf_objects<'source>(
 fn disassemble_ibf(ibf_source: &[u8]) -> Result<()> {
   let header = ibf::parse_header(ibf_source)?;
   print_ibf_header(&header);
+  let loader = ibf::Loader::new(&header, ibf_source)?;
   println!("");
-  print_ibf_objects(&header, ibf_source)
+  print_ibf_ids(&loader)?;
+  println!("");
+  print_ibf_objects(&loader)?;
+  Ok(())
 }
 
 const DUMP_ISEQ_PROGRAM_SOURCE: &'static str =

@@ -1,6 +1,6 @@
 use encoding::{self, Encoding};
 use lazy_array::LazyArray;
-use nom::{self, le_i32, le_i64, le_u32, le_u64};
+use nom::{self, le_i32, le_i64, le_u32};
 use num_traits::FromPrimitive;
 use std::{collections, convert, fmt, result, str, borrow::{self, Borrow}};
 
@@ -71,7 +71,12 @@ named!(
 );
 
 named!(
-  index_from_long<usize>,
+  size_from_unsigned_int<usize>,
+  do_parse!(raw: le_u32 >> (raw as usize))
+);
+
+named!(
+  size_from_long<usize>,
   do_parse!(raw: le_i64 >> (raw as usize))
 );
 
@@ -90,27 +95,28 @@ named!(
 );
 
 named!(
-  header<RawHeader>,
+  header<Header>,
   do_parse!(
-    magic >> version: version >> size: le_i32 >> extra_size: le_i32 >> iseq_list_size: le_i32
-      >> id_list_size: le_i32 >> object_list_size: le_i32 >> iseq_list_offset: le_i32
-      >> id_list_offset: le_i32 >> object_list_offset: le_i32 >> platform: cstr
-      >> (RawHeader {
-        version,
-        size,
-        extra_size,
-        iseq_list_size,
-        id_list_size,
-        object_list_size,
-        iseq_list_offset,
-        id_list_offset,
-        object_list_offset,
-        platform,
-      })
+    magic >> version: version >> size: size_from_unsigned_int >> extra_size: size_from_unsigned_int
+      >> iseq_list_size: size_from_unsigned_int >> id_list_size: size_from_unsigned_int
+      >> object_list_size: size_from_unsigned_int >> iseq_list_offset: size_from_unsigned_int
+      >> id_list_offset: size_from_unsigned_int >> object_list_offset: size_from_unsigned_int
+      >> platform: cstr >> (Header {
+      version,
+      size,
+      extra_size,
+      iseq_list_size,
+      id_list_size,
+      object_list_size,
+      iseq_list_offset,
+      id_list_offset,
+      object_list_offset,
+      platform,
+    })
   )
 );
 
-pub fn parse_header(ibf_source: &[u8]) -> Result<RawHeader> {
+pub fn parse_header(ibf_source: &[u8]) -> Result<Header> {
   match header(ibf_source) {
     Ok((_rest, header)) => Ok(header),
     Err(err) => Err(Error::Parse(ibf_source, err)),
@@ -143,26 +149,27 @@ named!(
   )
 );
 
-named_args!(
-  array<'a>(object_loader: &'a ObjectLoader<'a, 'a>) <&'a [u8], Value<'a, 'a>>,
-  do_parse!(
-    length: le_u64 >>
-    elements: count!(
-      do_parse!(
-        index: le_i64 >> (object_loader.load(index as usize).unwrap())
-      ),
-      length as usize
-    ) >>
-    (Value::Array(elements))
-  )
-);
-
-fn symbol<'objects, 'source: 'objects>(
+fn array<'loader, 'source: 'loader>(
   object_source: &'source [u8],
-  object_loader: &'objects ObjectLoader<'objects, 'objects>,
-) -> nom::IResult<&'source [u8], Value<'objects, 'objects>> {
-  let (rest, index) = index_from_long(object_source)?;
-  match object_loader.load(index) {
+  object_loader: &'loader Loader<'loader, 'source>,
+) -> nom::IResult<&'source [u8], Value<'loader, 'source>> {
+  let (mut rest, length) = size_from_long(object_source)?;
+  let mut elements = Vec::with_capacity(length);
+  for _ in 0..length {
+    let (next, index) = size_from_long(rest)?;
+    rest = next;
+    // TODO
+    elements.push(object_loader.load_object(index).unwrap());
+  }
+  Ok((rest, Value::Array(elements)))
+}
+
+fn symbol<'loader, 'source: 'loader>(
+  object_source: &'source [u8],
+  object_loader: &'loader Loader<'loader, 'source>,
+) -> nom::IResult<&'source [u8], Value<'loader, 'source>> {
+  let (rest, index) = size_from_long(object_source)?;
+  match object_loader.load_object(index) {
     Ok(&Value::String(ref s)) => Ok((rest, Value::Symbol(s.borrow()))),
     Ok(_) => Err(nom::Err::Error(nom::Context::Code(
       object_source,
@@ -177,67 +184,109 @@ named!(
   do_parse!(tagged_value: le_i64 >> (Value::Fixnum(tagged_value >> 1)))
 );
 
+fn object<'loader, 'source: 'loader>(
+  object_source: &'source [u8],
+  object_loader: &'loader Loader<'loader, 'source>,
+) -> nom::IResult<&'source [u8], Value<'loader, 'source>> {
+  let (rest, header) = object_header(object_source)?;
+  match header.ty() {
+    ValueTy::String => string(rest),
+    ValueTy::Array => array(rest, object_loader),
+    ValueTy::Nil => Ok((rest, Value::Nil)),
+    ValueTy::True => Ok((rest, Value::True)),
+    ValueTy::False => Ok((rest, Value::False)),
+    ValueTy::Symbol => symbol(rest, object_loader),
+    ValueTy::Fixnum => fixnum(rest),
+    _ => Ok((
+      rest,
+      Value::String(format!("Unknown type {:?}", header).into()),
+    )),
+  }
+}
+
 named_args!(
-  pub object<'a>(object_loader: &'a ObjectLoader<'a, 'a>) <&'a [u8], Value<'a, 'a>>,
-  do_parse!(
-    header: object_header >>
-    value: switch!(
-      value!(header.ty()),
-      ValueTy::String => call!(string) |
-      ValueTy::Array => apply!(array, object_loader) |
-      ValueTy::Nil => value!(Value::Nil) |
-      ValueTy::True => value!(Value::True) |
-      ValueTy::False => value!(Value::False) |
-      ValueTy::Symbol => apply!(symbol, object_loader) |
-      ValueTy::Fixnum => call!(fixnum) |
-      _ => value!(Value::String(format!("{:?}", header).into()))
-    ) >>
-    (value)
-  )
+  offset_list<'a>(offset: usize, size: usize) <Vec<usize>>,
+  preceded!(take!(offset), count!(size_from_unsigned_int, size))
 );
 
 named_args!(
-  offsets(object_count: usize) <Vec<usize>>,
-  count!(
-    do_parse!(offset: le_i32 >> (offset as usize)),
-    object_count
-  )
+  index_list(offset: usize, size: usize) <Vec<usize>>,
+  preceded!(take!(offset), count!(size_from_long, size))
 );
 
-pub struct ObjectLoader<'objects, 'source: 'objects> {
-  objects: LazyArray<Value<'objects, 'source>>,
-  offsets: Vec<usize>,
+pub struct Loader<'loader, 'source: 'loader> {
+  objects: LazyArray<Value<'loader, 'source>>,
+  ids: LazyArray<Id<'loader>>,
+  object_offsets: Vec<usize>,
+  id_indices: Vec<usize>,
   source: &'source [u8],
 }
 
-impl<'objects, 'source: 'objects> ObjectLoader<'objects, 'source> {
-  pub fn new(header: &RawHeader<'source>, source: &'source [u8]) -> Self {
-    let object_len = header.object_list_size as usize;
-    let (_rest, offsets) =
-      offsets(&source[header.object_list_offset as usize..], object_len).unwrap();
-    ObjectLoader {
-      objects: LazyArray::new(object_len),
-      offsets: offsets,
+impl<'objects, 'source: 'objects> Loader<'objects, 'source> {
+  pub fn new(
+    header: &Header<'source>,
+    source: &'source [u8],
+  ) -> Result<'source, Loader<'objects, 'source>> {
+    let object_offsets =
+      match offset_list(source, header.object_list_offset, header.object_list_size) {
+        Ok((_rest, offsets)) => offsets,
+        Err(err) => return Err(Error::Parse(source, err)),
+      };
+    let id_indices = match index_list(source, header.id_list_offset, header.id_list_size) {
+      Ok((_rest, indices)) => indices,
+      Err(err) => return Err(Error::Parse(source, err)),
+    };
+    Ok(Loader {
+      objects: LazyArray::new(header.object_list_size),
+      ids: LazyArray::new(header.id_list_size),
+      object_offsets: object_offsets,
+      id_indices: id_indices,
       source: source,
+    })
+  }
+
+  pub fn id_count(&self) -> usize {
+    self.id_indices.len()
+  }
+
+  pub fn object_count(&self) -> usize {
+    self.object_offsets.len()
+  }
+
+  pub fn load_id(&'objects self, index: usize) -> Result<'source, &'objects Id<'objects>> {
+    match self.ids.get(index) {
+      Some(value) => Ok(value),
+      None => {
+        let id = self.do_load_id(index)?;
+        Ok(self.ids.get_or_insert(index, id))
+      }
     }
   }
 
-  pub fn len(&self) -> usize {
-    self.offsets.len()
-  }
-
-  pub fn load(&'objects self, index: usize) -> Result<&'objects Value<'source, 'objects>> {
+  pub fn load_object(
+    &'objects self,
+    index: usize,
+  ) -> Result<'source, &'objects Value<'objects, 'source>> {
     match self.objects.get(index) {
-      Some(ref value) => Ok(value),
+      Some(value) => Ok(value),
       None => {
-        let object = self.do_load(index)?;
+        let object = self.do_load_object(index)?;
         Ok(self.objects.get_or_insert(index, object))
       }
     }
   }
 
-  fn do_load(&'objects self, index: usize) -> Result<Value<'source, 'objects>> {
-    let object_source = &self.source[self.offsets[index]..];
+  fn do_load_id(&'objects self, index: usize) -> Result<'source, Id<'objects>> {
+    let object_index = self.id_indices[index];
+    match self.load_object(object_index)? {
+      &Value::String(ref s) => Ok(Id(s.borrow())),
+      &Value::Nil => Ok(Id("")),
+      _ => panic!("TODO"),
+    }
+  }
+
+  fn do_load_object(&'objects self, index: usize) -> Result<'source, Value<'objects, 'source>> {
+    let object_source = &self.source[self.object_offsets[index]..];
     match object(object_source, self) {
       Ok((_rest, object)) => Ok(object),
       Err(err) => Err(Error::Parse(object_source, err)),
@@ -256,16 +305,16 @@ pub struct Document {
 }
 
 #[derive(Debug)]
-pub struct RawHeader<'source> {
+pub struct Header<'source> {
   pub version: Version,
-  pub size: i32,
-  pub extra_size: i32,
-  pub iseq_list_size: i32,
-  pub id_list_size: i32,
-  pub object_list_size: i32,
-  pub iseq_list_offset: i32,
-  pub id_list_offset: i32,
-  pub object_list_offset: i32,
+  pub size: usize,
+  pub extra_size: usize,
+  pub iseq_list_size: usize,
+  pub id_list_size: usize,
+  pub object_list_size: usize,
+  pub iseq_list_offset: usize,
+  pub id_list_offset: usize,
+  pub object_list_offset: usize,
   pub platform: &'source str,
 }
 
@@ -281,6 +330,9 @@ pub enum IseqType {
   Main,
   DefinedGuard,
 }
+
+#[derive(Clone, Debug)]
+pub struct Id<'objects>(&'objects str);
 
 #[derive(Clone, Debug)]
 pub enum Value<'objects, 'source: 'objects> {
