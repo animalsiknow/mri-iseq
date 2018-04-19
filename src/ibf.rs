@@ -41,10 +41,7 @@ impl<'source> fmt::Display for Error<'source> {
       &Error::Parse(source, nom::Err::Error(ref context)) => {
         let error = Err(nom::Err::Error(context.clone()));
         if let Some(errors) = nom::prepare_errors::<&[u8], u32>(source, error) {
-          writeln!(
-            f,
-            "================== Error: Invalid IBF =================="
-          )?;
+          writeln!(f, "{:=^80}", "Error: Invalid IBF")?;
           if let Some(message) = ERROR_PATTERNS.get(&nom::error_to_list(context)) {
             writeln!(f, "{}", message)?;
           }
