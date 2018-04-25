@@ -11,12 +11,17 @@ const DISASSEMBLE_HELP: &'static str = "Disassemble MRI instruction sequences.";
 const DISASSEMBLE_INPUT_HELP: &'static str =
   &"File to disassemble. It can either be an instruction sequence dump or a Ruby file.";
 
+const COMPILE_HELP: &'static str = "";
+const COMPILE_INPUT_HELP: &'static str = &"";
+const COMPILE_OUTPUT_HELP: &'static str = &"";
+
 #[derive(Debug)]
 enum Error {
   Parse(String),
   Io(io::Error),
   Popen(subprocess::PopenError),
   Cli(clap::Error),
+  Ruby,
 }
 
 impl<'source> From<ibf::Error<'source>> for Error {
@@ -61,6 +66,23 @@ fn app<'a, 'b>() -> clap::App<'a, 'b> {
             .index(1),
         ),
     )
+    .subcommand(
+      clap::SubCommand::with_name("compile")
+        .visible_alias("c")
+        .about(COMPILE_HELP)
+        .arg(
+          clap::Arg::with_name("INPUT")
+            .help(COMPILE_INPUT_HELP)
+            .required(true)
+            .index(1),
+        )
+        .arg(
+          clap::Arg::with_name("OUTPUT")
+            .help(COMPILE_OUTPUT_HELP)
+            .required(true)
+            .index(2),
+        ),
+    )
 }
 
 fn print_ibf_header<'source>(header: &ibf::Header) {
@@ -89,6 +111,16 @@ fn print_ibf_header<'source>(header: &ibf::Header) {
   println!("  Platform:\t\t\t{}", header.platform);
 }
 
+fn print_ibf_iseqs<'loader, 'source: 'loader>(
+  loader: &'loader ibf::Loader<'loader, 'source>,
+) -> Result<()> {
+  println!("Iseqs:");
+  for i in 0..loader.iseq_count() {
+    println!("  {}: {:?}", i, loader.load_iseq(i)?);
+  }
+  Ok(())
+}
+
 fn print_ibf_ids<'source, 'loader: 'source>(
   loader: &'loader ibf::Loader<'source, 'loader>,
 ) -> Result<()> {
@@ -113,6 +145,8 @@ fn disassemble_ibf(ibf_source: &[u8]) -> Result<()> {
   let header = ibf::parse_header(ibf_source)?;
   print_ibf_header(&header);
   let loader = ibf::Loader::new(&header, ibf_source)?;
+  println!("");
+  print_ibf_iseqs(&loader)?;
   println!("");
   print_ibf_ids(&loader)?;
   println!("");
@@ -148,6 +182,24 @@ fn disassemble(file_name: &str) -> Result<()> {
   }
 }
 
+fn compile(input_path_name: &str, output_path_name: &str) -> Result<()> {
+  let input_path = path::Path::new(input_path_name);
+  let input_file = fs::File::open(input_path)?;
+  let output_path = path::Path::new(output_path_name);
+  let output_file = fs::File::create(output_path)?;
+  let status = subprocess::Exec::cmd("ruby")
+    .arg("-e")
+    .arg(DUMP_ISEQ_PROGRAM_SOURCE)
+    .stdin(input_file)
+    .stdout(output_file)
+    .join()?;
+  if status.success() {
+    Ok(())
+  } else {
+    Err(Error::Ruby)
+  }
+}
+
 fn print_help() -> Result<()> {
   app().print_help()?;
   Ok(())
@@ -161,6 +213,14 @@ fn go() -> Result<()> {
       Some(file_name) => disassemble(file_name),
       None => print_help(),
     }
+  } else if let Some(compile_matches) = matches.subcommand_matches("compile") {
+    match (
+      compile_matches.value_of("INPUT"),
+      compile_matches.value_of("OUTPUT"),
+    ) {
+      (Some(input_path_name), Some(output_path_name)) => compile(input_path_name, output_path_name),
+      _ => print_help(),
+    }
   } else {
     print_help()
   }
@@ -173,6 +233,9 @@ fn main() {
       match err {
         &Error::Parse(ref message) => {
           println!("{}", message);
+        }
+        &Error::Ruby => {
+          println!("The Ruby process did not exit successfuly, see its output for more details.");
         }
         err => {
           println!("{:?}", err);

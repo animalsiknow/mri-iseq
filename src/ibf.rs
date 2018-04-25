@@ -6,7 +6,7 @@ use std::{collections, convert, fmt, result, str, borrow::{self, Borrow}};
 
 #[repr(u32)]
 pub enum ErrorKind {
-  SymbolIsNotAString = 1024,
+  ObjectIsNotAString = 1024,
 }
 
 lazy_static! {
@@ -41,7 +41,7 @@ impl<'source> fmt::Display for Error<'source> {
       &Error::Parse(source, nom::Err::Error(ref context)) => {
         let error = Err(nom::Err::Error(context.clone()));
         if let Some(errors) = nom::prepare_errors::<&[u8], u32>(source, error) {
-          writeln!(f, "{:=^80}", "Error: Invalid IBF")?;
+          writeln!(f, "{:=^80}", " Error: Invalid IBF ")?;
           if let Some(message) = ERROR_PATTERNS.get(&nom::error_to_list(context)) {
             writeln!(f, "{}", message)?;
           }
@@ -60,6 +60,14 @@ impl<'source> fmt::Display for Error<'source> {
   }
 }
 
+impl<'source> From<Error<'source>> for nom::Err<&'source [u8]> {
+  fn from(err: Error<'source>) -> Self {
+    match err {
+      Error::Parse(_, inner_err) => inner_err,
+    }
+  }
+}
+
 pub type Result<'source, T> = result::Result<T, Error<'source>>;
 
 named!(
@@ -67,13 +75,27 @@ named!(
   map_res!(take_until_and_consume!("\0"), |bytes| str::from_utf8(bytes))
 );
 
+named!(u16_from_ptr<u16>, do_parse!(raw: le_i64 >> (raw as u16)));
+
+named!(i32_from_signed_int<i32>, do_parse!(raw: le_i32 >> (raw)));
+
 named!(
   size_from_unsigned_int<usize>,
   do_parse!(raw: le_u32 >> (raw as usize))
 );
 
 named!(
+  size_from_signed_int<usize>,
+  do_parse!(raw: le_i32 >> (raw as usize))
+);
+
+named!(
   size_from_long<usize>,
+  do_parse!(raw: le_i64 >> (raw as usize))
+);
+
+named!(
+  size_from_ptr<usize>,
   do_parse!(raw: le_i64 >> (raw as usize))
 );
 
@@ -166,14 +188,7 @@ fn symbol<'loader, 'source: 'loader>(
   object_loader: &'loader Loader<'loader, 'source>,
 ) -> nom::IResult<&'source [u8], Value<'loader, 'source>> {
   let (rest, index) = size_from_long(object_source)?;
-  match object_loader.load_object(index) {
-    Ok(&Value::String(ref s)) => Ok((rest, Value::Symbol(s.borrow()))),
-    Ok(_) => Err(nom::Err::Error(nom::Context::Code(
-      object_source,
-      nom::ErrorKind::Custom(ErrorKind::SymbolIsNotAString as u32),
-    ))),
-    Err(err) => panic!("TODO: {:?}", err),
-  }
+  Ok((rest, Value::Symbol(object_loader.load_string(index)?)))
 }
 
 named!(
@@ -211,11 +226,185 @@ named_args!(
   preceded!(take!(offset), count!(size_from_long, size))
 );
 
+named!(
+  iseq_type<IseqType>,
+  map_opt!(le_i32, FromPrimitive::from_i32)
+);
+
+named!(
+  iseq_param_flags<IseqParamFlags>,
+  do_parse!(raw: le_u32 >> (IseqParamFlags(raw)))
+);
+
+named!(
+  iseq_param_spec<IseqParamSpec>,
+  do_parse!(
+    flags: iseq_param_flags >> _size: size_from_unsigned_int >> lead_size: size_from_signed_int
+      >> optional_size: size_from_signed_int >> _rest_start: size_from_signed_int
+      >> _post_start: size_from_signed_int >> post_size: size_from_signed_int
+      >> _block_start: size_from_signed_int >> _opt_table: size_from_ptr
+      >> _keywords: size_from_ptr >> (IseqParamSpec {
+      size_lead: lead_size,
+      size_opt: optional_size,
+      has_rest: flags.has_rest(),
+      size_post: post_size,
+      keywords: vec![],
+      has_kw_rest: flags.has_kwrest(),
+      has_block: flags.has_block(),
+    })
+  )
+);
+
+fn make_source_path_from_array<'loader>(a: &Vec<&'loader Value>) -> SourcePath<'loader> {
+  match (a[0], a[1]) {
+    (&Value::String(ref path), &Value::Nil) => SourcePath::Path(path.borrow()),
+    (&Value::String(ref path), &Value::String(ref real_path)) => SourcePath::RealPath {
+      path: path.borrow(),
+      real_path: real_path.borrow(),
+    },
+    _ => panic!("TODO"),
+  }
+}
+
+fn source_path<'loader, 'source: 'loader>(
+  source: &'source [u8],
+  object_loader: &'loader Loader<'loader, 'source>,
+) -> nom::IResult<&'source [u8], SourcePath<'loader>> {
+  let (next_source, index) = size_from_ptr(source)?;
+  match object_loader.load_object(index)? {
+    &Value::String(ref s) => Ok((next_source, SourcePath::Path(s.borrow()))),
+    &Value::Array(ref a) => Ok((next_source, make_source_path_from_array(a))),
+    _ => Err(nom::Err::Error(nom::Context::Code(
+      source,
+      nom::ErrorKind::Custom(ErrorKind::ObjectIsNotAString as u32),
+    ))),
+  }
+}
+
+named!(
+  source_location<SourceLocation>,
+  do_parse!(
+    line: i32_from_signed_int >> column: i32_from_signed_int >> (SourceLocation { line, column })
+  )
+);
+
+named!(
+  source_range<SourceRange>,
+  do_parse!(
+    first_location: source_location >> last_location: source_location >> (SourceRange {
+      first_location,
+      last_location
+    })
+  )
+);
+
+fn iseq_location<'loader, 'source: 'loader>(
+  source: &'source [u8],
+  object_loader: &'loader Loader<'loader, 'source>,
+) -> nom::IResult<&'source [u8], IseqLocation<'loader>> {
+  let (source, path) = source_path(source, object_loader)?;
+
+  let (source, index) = size_from_ptr(source)?;
+  let base_label = object_loader.load_string(index)?;
+
+  let (source, index) = size_from_ptr(source)?;
+  let label = object_loader.load_string(index)?;
+
+  let (source, first_line_number) = u16_from_ptr(source)?;
+
+  let (source, source_range) = source_range(source)?;
+
+  Ok((
+    source,
+    IseqLocation {
+      path,
+      base_label,
+      label,
+      first_line_number,
+      source_range,
+    },
+  ))
+}
+
+fn iseq<'loader, 'source: 'loader>(
+  source: &'source [u8],
+  object_loader: &'loader Loader<'loader, 'source>,
+) -> nom::IResult<&'source [u8], Iseq<'loader, 'source>> {
+  // Offset: 0x00
+  let (source, ty) = iseq_type(source)?;
+  // Offset: 0x04
+  let (source, size) = size_from_unsigned_int(source)?;
+  // Offset: 0x08
+  let (source, _iseq_encoded) = size_from_ptr(source)?;
+  // Offset: 0x10
+  let (source, param_spec) = iseq_param_spec(source)?;
+  // Offset: 0x40
+  let (source, location) = iseq_location(source, object_loader)?;
+  // Offset: 0x70
+  let (source, _insns_info) = size_from_ptr(source)?;
+  // Offset: 0x78
+  let (source, _local_table) = size_from_ptr(source)?;
+  // Offset: 0x80
+  let (source, _catch_table) = size_from_ptr(source)?;
+  // Offset: 0x88
+  let (source, _parent_iseq) = size_from_ptr(source)?;
+  // Offset: 0x90
+  let (source, _local_iseq) = size_from_ptr(source)?;
+  // Offset: 0x98
+  let (source, _is_entries) = size_from_ptr(source)?;
+  // Offset: 0xa0
+  let (source, _ci_entries) = size_from_ptr(source)?;
+  // Offset: 0xa8
+  let (source, _cc_entries) = size_from_ptr(source)?;
+  // Offset: 0xb0
+  let (source, _mark_array) = size_from_ptr(source)?;
+  // Offset: 0xb8
+  let (source, _local_table_size) = size_from_unsigned_int(source)?;
+  // Offset: 0xbc
+  let (source, _is_size) = size_from_unsigned_int(source)?;
+  // Offset: 0xc0
+  let (source, _ci_size) = size_from_unsigned_int(source)?;
+  // Offset: 0xc4
+  let (source, _ci_kw_size) = size_from_unsigned_int(source)?;
+  // Offset: 0xc8
+  let (source, _insns_info_size) = size_from_unsigned_int(source)?;
+  // Offset: 0xcc
+  let (source, _stack_max) = size_from_unsigned_int(source)?;
+  // Total size: 0xd0
+  Ok((
+    source,
+    Iseq {
+      ty,
+      size,
+      _iseq_encoded,
+      param_spec,
+      location,
+      _insns_info,
+      _local_table,
+      _catch_table,
+      _parent_iseq,
+      _local_iseq,
+      _is_entries,
+      _ci_entries,
+      _cc_entries,
+      _mark_array,
+      _local_table_size,
+      _is_size,
+      _ci_size,
+      _ci_kw_size,
+      _insns_info_size,
+      _stack_max,
+    },
+  ))
+}
+
 pub struct Loader<'loader, 'source: 'loader> {
-  objects: LazyArray<Value<'loader, 'source>>,
+  iseqs: LazyArray<Iseq<'loader, 'source>>,
   ids: LazyArray<Id<'loader>>,
-  object_offsets: Vec<usize>,
+  objects: LazyArray<Value<'loader, 'source>>,
+  iseq_offsets: Vec<usize>,
   id_indices: Vec<usize>,
+  object_offsets: Vec<usize>,
   source: &'source [u8],
 }
 
@@ -224,22 +413,26 @@ impl<'loader, 'source: 'loader> Loader<'loader, 'source> {
     header: &Header<'source>,
     source: &'source [u8],
   ) -> Result<'source, Loader<'loader, 'source>> {
-    let object_offsets =
-      match offset_list(source, header.object_list_offset, header.object_list_size) {
-        Ok((_rest, offsets)) => offsets,
-        Err(err) => return Err(Error::Parse(source, err)),
-      };
-    let id_indices = match index_list(source, header.id_list_offset, header.id_list_size) {
-      Ok((_rest, indices)) => indices,
-      Err(err) => return Err(Error::Parse(source, err)),
-    };
+    let (_rest, iseq_offsets) = offset_list(source, header.iseq_list_offset, header.iseq_list_size)
+      .map_err(|err| Error::Parse(source, err))?;
+    let (_rest, id_indices) = index_list(source, header.id_list_offset, header.id_list_size)
+      .map_err(|err| Error::Parse(source, err))?;
+    let (_rest, object_offsets) =
+      offset_list(source, header.object_list_offset, header.object_list_size)
+        .map_err(|err| Error::Parse(source, err))?;
     Ok(Loader {
-      objects: LazyArray::new(header.object_list_size),
+      iseqs: LazyArray::new(header.iseq_list_size),
       ids: LazyArray::new(header.id_list_size),
-      object_offsets: object_offsets,
-      id_indices: id_indices,
-      source: source,
+      objects: LazyArray::new(header.object_list_size),
+      iseq_offsets,
+      id_indices,
+      object_offsets,
+      source,
     })
+  }
+
+  pub fn iseq_count(&self) -> usize {
+    self.iseq_offsets.len()
   }
 
   pub fn id_count(&self) -> usize {
@@ -250,26 +443,59 @@ impl<'loader, 'source: 'loader> Loader<'loader, 'source> {
     self.object_offsets.len()
   }
 
+  pub fn load_iseq(
+    &'loader self,
+    index: usize,
+  ) -> Result<'source, &'loader Iseq<'loader, 'source>> {
+    self.iseqs.get(index).map_or_else(
+      || Ok(self.iseqs.get_or_insert(index, self.do_load_iseq(index)?)),
+      |iseq| Ok(iseq),
+    )
+  }
+
   pub fn load_id(&'loader self, index: usize) -> Result<'source, &'loader Id<'loader>> {
-    match self.ids.get(index) {
-      Some(value) => Ok(value),
-      None => {
-        let id = self.do_load_id(index)?;
-        Ok(self.ids.get_or_insert(index, id))
-      }
-    }
+    self.ids.get(index).map_or_else(
+      || Ok(self.ids.get_or_insert(index, self.do_load_id(index)?)),
+      |id| Ok(id),
+    )
   }
 
   pub fn load_object(
     &'loader self,
     index: usize,
   ) -> Result<'source, &'loader Value<'loader, 'source>> {
-    match self.objects.get(index) {
-      Some(value) => Ok(value),
-      None => {
-        let object = self.do_load_object(index)?;
-        Ok(self.objects.get_or_insert(index, object))
+    self.objects.get(index).map_or_else(
+      || {
+        Ok(
+          self
+            .objects
+            .get_or_insert(index, self.do_load_object(index)?),
+        )
+      },
+      |object| Ok(object),
+    )
+  }
+
+  pub fn load_string(&'loader self, index: usize) -> Result<'source, &'loader str> {
+    match self.load_object(index)? {
+      &Value::String(ref s) => Ok(s.borrow()),
+      _ => {
+        return Err(Error::Parse(
+          self.source,
+          nom::Err::Error(nom::Context::Code(
+            self.source,
+            nom::ErrorKind::Custom(ErrorKind::ObjectIsNotAString as u32),
+          )),
+        ))
       }
+    }
+  }
+
+  fn do_load_iseq(&'loader self, index: usize) -> Result<'source, Iseq<'loader, 'source>> {
+    let iseq_source = &self.source[self.iseq_offsets[index]..];
+    match iseq(iseq_source, self) {
+      Ok((_rest, iseq)) => Ok(iseq),
+      Err(err) => Err(Error::Parse(iseq_source, err)),
     }
   }
 
@@ -313,19 +539,6 @@ pub struct Header<'source> {
   pub id_list_offset: usize,
   pub object_list_offset: usize,
   pub platform: &'source str,
-}
-
-#[derive(Debug)]
-pub enum IseqType {
-  Top,
-  Method,
-  Block,
-  Class,
-  Rescue,
-  Ensure,
-  Eval,
-  Main,
-  DefinedGuard,
 }
 
 #[derive(Clone, Debug)]
@@ -409,6 +622,63 @@ pub enum StringEncoding {
   Windows31J = 0xb,
 }
 
+/// TODO
+#[derive(Debug)]
+pub enum SourcePath<'loader> {
+  Path(&'loader str),
+  RealPath {
+    path: &'loader str,
+    real_path: &'loader str,
+  },
+}
+
+#[derive(Debug)]
+pub struct SourceLocation {
+  line: i32,
+  column: i32,
+}
+
+#[derive(Debug)]
+pub struct SourceRange {
+  first_location: SourceLocation,
+  last_location: SourceLocation,
+}
+
+#[derive(Debug)]
+pub struct IseqLocation<'loader> {
+  path: SourcePath<'loader>,
+  base_label: &'loader str,
+  label: &'loader str,
+  first_line_number: u16,
+  source_range: SourceRange,
+}
+
+#[derive(Debug, FromPrimitive)]
+pub enum IseqType {
+  Top = 0,
+  Method = 1,
+  Block = 2,
+  Class = 3,
+  Rescue = 4,
+  Ensure = 5,
+  Eval = 6,
+  Main = 7,
+  DefinedGuard = 8,
+}
+
+bitfield!{
+  pub struct IseqParamFlags(u32);
+  impl Debug;
+  pub has_lead, _: 0;
+  pub has_opt, _: 1;
+  pub has_rest, _: 2;
+  pub has_post, _: 3;
+  pub has_kw, _: 4;
+  pub has_kwrest, _: 5;
+  pub has_block, _: 6;
+  pub ambiguous_param0, _: 7;
+}
+
 #[derive(Debug)]
 pub struct KwParam<'loader, 'source: 'loader> {
   pub name: &'source str,
@@ -417,10 +687,10 @@ pub struct KwParam<'loader, 'source: 'loader> {
 
 #[derive(Debug)]
 pub struct IseqParamSpec<'loader, 'source: 'loader> {
-  pub size_lead: u32,
-  pub size_opt: u32,
+  pub size_lead: usize,
+  pub size_opt: usize,
   pub has_rest: bool,
-  pub size_post: u32,
+  pub size_post: usize,
   pub keywords: Vec<KwParam<'loader, 'source>>,
   pub has_kw_rest: bool,
   pub has_block: bool,
@@ -429,5 +699,23 @@ pub struct IseqParamSpec<'loader, 'source: 'loader> {
 #[derive(Debug)]
 pub struct Iseq<'loader, 'source: 'loader> {
   pub ty: IseqType,
+  pub size: usize,
+  pub _iseq_encoded: usize,
   pub param_spec: IseqParamSpec<'loader, 'source>,
+  pub location: IseqLocation<'loader>,
+  pub _insns_info: usize,
+  pub _local_table: usize,
+  pub _catch_table: usize,
+  pub _parent_iseq: usize,
+  pub _local_iseq: usize,
+  pub _is_entries: usize,
+  pub _ci_entries: usize,
+  pub _cc_entries: usize,
+  pub _mark_array: usize,
+  pub _local_table_size: usize,
+  pub _is_size: usize,
+  pub _ci_size: usize,
+  pub _ci_kw_size: usize,
+  pub _insns_info_size: usize,
+  pub _stack_max: usize,
 }
