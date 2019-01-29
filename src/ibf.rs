@@ -1,8 +1,14 @@
+use bitfield::bitfield;
+use cursed_collections::LazyArray;
 use encoding::{self, Encoding};
-use lazy_array::LazyArray;
-use nom::{self, le_i32, le_i64, le_u32};
+use lazy_static::lazy_static;
+use nom::{self, *};
+use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
-use std::{collections, convert, fmt, result, str, borrow::{self, Borrow}};
+use std::{
+  borrow::{self, Borrow},
+  collections, convert, fmt, result, str,
+};
 
 #[repr(u32)]
 pub enum ErrorKind {
@@ -116,22 +122,29 @@ named!(
 named!(
   header<Header>,
   do_parse!(
-    magic >> version: version >> size: size_from_unsigned_int >> extra_size: size_from_unsigned_int
-      >> iseq_list_size: size_from_unsigned_int >> id_list_size: size_from_unsigned_int
-      >> object_list_size: size_from_unsigned_int >> iseq_list_offset: size_from_unsigned_int
-      >> id_list_offset: size_from_unsigned_int >> object_list_offset: size_from_unsigned_int
-      >> platform: cstr >> (Header {
-      version,
-      size,
-      extra_size,
-      iseq_list_size,
-      id_list_size,
-      object_list_size,
-      iseq_list_offset,
-      id_list_offset,
-      object_list_offset,
-      platform,
-    })
+    magic
+      >> version: version
+      >> size: size_from_unsigned_int
+      >> extra_size: size_from_unsigned_int
+      >> iseq_list_size: size_from_unsigned_int
+      >> id_list_size: size_from_unsigned_int
+      >> object_list_size: size_from_unsigned_int
+      >> iseq_list_offset: size_from_unsigned_int
+      >> id_list_offset: size_from_unsigned_int
+      >> object_list_offset: size_from_unsigned_int
+      >> platform: cstr
+      >> (Header {
+        version,
+        size,
+        extra_size,
+        iseq_list_size,
+        id_list_size,
+        object_list_size,
+        iseq_list_offset,
+        id_list_offset,
+        object_list_offset,
+        platform,
+      })
   )
 );
 
@@ -163,7 +176,9 @@ fn convert_string(encoding_index: i64, data: &[u8]) -> Value {
 named!(
   string<Value>,
   do_parse!(
-    encoding_index: le_i64 >> length: le_i64 >> data: take!(length)
+    encoding_index: le_i64
+      >> length: le_i64
+      >> data: take!(length)
       >> (convert_string(encoding_index, data))
   )
 );
@@ -239,19 +254,25 @@ named!(
 named!(
   iseq_param_spec<IseqParamSpec>,
   do_parse!(
-    flags: iseq_param_flags >> _size: size_from_unsigned_int >> lead_size: size_from_signed_int
-      >> optional_size: size_from_signed_int >> _rest_start: size_from_signed_int
-      >> _post_start: size_from_signed_int >> post_size: size_from_signed_int
-      >> _block_start: size_from_signed_int >> _opt_table: size_from_ptr
-      >> _keywords: size_from_ptr >> (IseqParamSpec {
-      size_lead: lead_size,
-      size_opt: optional_size,
-      has_rest: flags.has_rest(),
-      size_post: post_size,
-      keywords: vec![],
-      has_kw_rest: flags.has_kwrest(),
-      has_block: flags.has_block(),
-    })
+    flags: iseq_param_flags
+      >> _size: size_from_unsigned_int
+      >> lead_size: size_from_signed_int
+      >> optional_size: size_from_signed_int
+      >> _rest_start: size_from_signed_int
+      >> _post_start: size_from_signed_int
+      >> post_size: size_from_signed_int
+      >> _block_start: size_from_signed_int
+      >> _opt_table: size_from_ptr
+      >> _keywords: size_from_ptr
+      >> (IseqParamSpec {
+        size_lead: lead_size,
+        size_opt: optional_size,
+        has_rest: flags.has_rest(),
+        size_post: post_size,
+        keywords: vec![],
+        has_kw_rest: flags.has_kwrest(),
+        has_block: flags.has_block(),
+      })
   )
 );
 
@@ -291,10 +312,12 @@ named!(
 named!(
   source_range<SourceRange>,
   do_parse!(
-    first_location: source_location >> last_location: source_location >> (SourceRange {
-      first_location,
-      last_location
-    })
+    first_location: source_location
+      >> last_location: source_location
+      >> (SourceRange {
+        first_location,
+        last_location
+      })
   )
 );
 
@@ -486,7 +509,7 @@ impl<'loader, 'source: 'loader> Loader<'loader, 'source> {
             self.source,
             nom::ErrorKind::Custom(ErrorKind::ObjectIsNotAString as u32),
           )),
-        ))
+        ));
       }
     }
   }
@@ -555,7 +578,7 @@ pub enum Value<'loader, 'source: 'loader> {
   Fixnum(i64),
 }
 
-bitfield!{
+bitfield! {
   pub struct RawValueHeader(u32);
   impl Debug;
   pub u8, into ValueTy, ty, _: 4, 0;
@@ -666,7 +689,7 @@ pub enum IseqType {
   DefinedGuard = 8,
 }
 
-bitfield!{
+bitfield! {
   pub struct IseqParamFlags(u32);
   impl Debug;
   pub has_lead, _: 0;
