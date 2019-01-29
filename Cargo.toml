@@ -6,6 +6,7 @@ authors = ["Simon Génier <1782845+animalsiknow@users.noreply.github.com>"]
 homepage = "https://github.com/animalsiknow/mir-iseq"
 license = "AGPL-3.0-or-later"
 readme = "README.org"
+edition = "2018"
 
 [dependencies.bitfield]
 version = "0.12.1"
